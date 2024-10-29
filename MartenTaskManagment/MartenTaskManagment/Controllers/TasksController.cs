@@ -2,8 +2,8 @@
 using Marten;
 using MartenTaskManagment.DTOs;
 using MartenTaskManagment.Events;
+using MartenTaskManagment.Interfaces;
 using MartenTaskManagment.Models;
-using MartenTaskManagment.Services;
 using Microsoft.AspNetCore.Mvc;
 
 namespace MartenTaskManagment.Controllers
@@ -13,9 +13,9 @@ namespace MartenTaskManagment.Controllers
     public class TasksController : ControllerBase
     {
         private readonly IDocumentSession _session;
-        private readonly TaskModelService _taskService;
+        private readonly ITaskModelService _taskService;
 
-        public TasksController(IDocumentSession session, TaskModelService taskService)
+        public TasksController(IDocumentSession session, ITaskModelService taskService)
         {
             _session = session;
             _taskService = taskService;
@@ -66,7 +66,7 @@ namespace MartenTaskManagment.Controllers
             var existingTask = await _taskService.GetTaskModelById(id);
             if (existingTask == null) return NotFound();
 
-            if (existingTask.Title != updatedTask.Title)
+            if (existingTask.Title != updatedTask.Title && !string.IsNullOrEmpty(updatedTask.Title))
             {
                 _session.Events.Append(id, new TaskTitleUpdated
                 {
@@ -76,7 +76,7 @@ namespace MartenTaskManagment.Controllers
                 });
             }
 
-            if (existingTask.Description != updatedTask.Description)
+            if (existingTask.Description != updatedTask.Description && !string.IsNullOrEmpty(updatedTask.Description))
             {
                 _session.Events.Append(id, new TaskDescriptionUpdated
                 {

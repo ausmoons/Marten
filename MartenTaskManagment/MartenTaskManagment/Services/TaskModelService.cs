@@ -1,10 +1,11 @@
 ﻿using Marten;
 using MartenTaskManagment.Events;
+using MartenTaskManagment.Interfaces;
 using MartenTaskManagment.Models;
 
 namespace MartenTaskManagment.Services
 {
-    public class TaskModelService
+    public class TaskModelService : ITaskModelService
     {
         private readonly IDocumentSession _session;
 
@@ -43,6 +44,16 @@ namespace MartenTaskManagment.Services
 
                     case TaskStatusUpdated taskStatusUpdated when task != null:
                         task.Status = taskStatusUpdated.NewStatus;
+                        break;
+                    case TaskTitleUpdated taskTitleUpdated when task != null:
+                        task.Title = taskTitleUpdated.NewTitle;
+                        break;
+
+                    case TaskDescriptionUpdated taskDescriptionUpdated when task != null:
+                        task.Description = taskDescriptionUpdated.NewDescription;
+                        break;
+                    case TaskDueDateUpdated taskDueDateUpdated when task != null:
+                        task.DueDate = taskDueDateUpdated.NewDueDate;
                         break;
                 }
             }

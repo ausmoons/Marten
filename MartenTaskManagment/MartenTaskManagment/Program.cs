@@ -1,5 +1,6 @@
 using Marten;
 using MartenTaskManagment.Events;
+using MartenTaskManagment.Interfaces;
 using MartenTaskManagment.Models;
 using MartenTaskManagment.Services;
 
@@ -32,7 +33,7 @@ namespace MartenTaskManagment
                 });
             });
 
-            builder.Services.AddScoped<TaskModelService>();
+            builder.Services.AddScoped<ITaskModelService, TaskModelService>();
 
             builder.Services.AddScoped(provider =>
             {
