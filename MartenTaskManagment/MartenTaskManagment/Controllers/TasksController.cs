@@ -3,7 +3,6 @@ using Marten;
 using MartenTaskManagment.DTOs;
 using MartenTaskManagment.Events;
 using MartenTaskManagment.Interfaces;
-using MartenTaskManagment.Models;
 using Microsoft.AspNetCore.Mvc;
 
 namespace MartenTaskManagment.Controllers
@@ -21,12 +20,20 @@ namespace MartenTaskManagment.Controllers
             _taskService = taskService;
         }
 
+        [HttpGet("all")]
+        public async Task<IActionResult> GetAllTasks()
+        {
+            var tasks = await _taskService.GetAllTasksAsync();
+            return Ok(tasks);
+        }
+
         [HttpPost]
         public async Task<IActionResult> CreateTask([FromBody] TaskCreationDTO taskDto)
         {
-            var task = new TaskModel
+            var taskId = Guid.NewGuid();
+            var taskCreatedEvent = new TaskCreated
             {
-                Id = Guid.NewGuid(),
+                TaskId = taskId,
                 Title = taskDto.Title,
                 Description = taskDto.Description,
                 DueDate = taskDto.DueDate,
@@ -35,29 +42,15 @@ namespace MartenTaskManagment.Controllers
                 CreatedAt = DateTime.UtcNow
             };
 
-            var taskCreatedEvent = new TaskCreated
-            {
-                TaskId = task.Id,
-                Title = task.Title,
-                Description = task.Description,
-                DueDate = task.DueDate,
-                Status = task.Status,
-                AssignedUser = task.AssignedUser,
-                CreatedAt = task.CreatedAt
-            };
-
-            _session.Events.StartStream(task.Id, taskCreatedEvent);
-            await _session.SaveChangesAsync();
-
-            return CreatedAtAction(nameof(GetTaskById), new { id = task.Id }, task);
+            await AppendEvent(taskId, taskCreatedEvent);
+            return CreatedAtAction(nameof(GetTaskById), new { id = taskId }, taskDto);
         }
 
         [HttpGet("{id}")]
         public async Task<IActionResult> GetTaskById(Guid id)
         {
             var task = await _taskService.GetTaskModelById(id);
-            if (task == null) return NotFound();
-            return Ok(task);
+            return task != null ? Ok(task) : NotFound();
         }
 
         [HttpPut("{id}")]
@@ -66,98 +59,80 @@ namespace MartenTaskManagment.Controllers
             var existingTask = await _taskService.GetTaskModelById(id);
             if (existingTask == null) return NotFound();
 
-            if (existingTask.Title != updatedTask.Title && !string.IsNullOrEmpty(updatedTask.Title))
+            var updateEvents = _taskService.GetUpdateEvents(id, existingTask, updatedTask);
+            foreach (var updateEvent in updateEvents)
             {
-                _session.Events.Append(id, new TaskTitleUpdated
-                {
-                    TaskId = id,
-                    NewTitle = updatedTask.Title,
-                    UpdatedAt = DateTime.UtcNow
-                });
+                await AppendEvent(id, updateEvent);
             }
 
-            if (existingTask.Description != updatedTask.Description && !string.IsNullOrEmpty(updatedTask.Description))
-            {
-                _session.Events.Append(id, new TaskDescriptionUpdated
-                {
-                    TaskId = id,
-                    NewDescription = updatedTask.Description,
-                    UpdatedAt = DateTime.UtcNow
-                });
-            }
-
-            if (updatedTask.DueDate.HasValue && existingTask.DueDate != updatedTask.DueDate.Value)
-            {
-                _session.Events.Append(id, new TaskDueDateUpdated
-                {
-                    TaskId = id,
-                    NewDueDate = updatedTask.DueDate.Value,
-                    UpdatedAt = DateTime.UtcNow
-                });
-            }
-
-            await _session.SaveChangesAsync();
             return Ok();
         }
 
         [HttpDelete("{id}")]
         public async Task<IActionResult> DeleteTask(Guid id)
         {
-            _session.Events.Append(id, new TaskDeleted
+            var taskDeletedEvent = new TaskDeleted
             {
                 TaskId = id,
                 DeletedAt = DateTime.UtcNow
-            });
-            await _session.SaveChangesAsync();
+            };
+
+            await AppendEvent(id, taskDeletedEvent);
             return NoContent();
         }
 
         [HttpPut("{id}/assign")]
         public async Task<IActionResult> AssignTask(Guid id, [FromBody] string assignedUser)
         {
-            _session.Events.Append(id, new TaskAssigned
+            var taskAssignedEvent = new TaskAssigned
             {
                 TaskId = id,
                 AssignedUser = assignedUser,
                 AssignedDate = DateTime.UtcNow
-            });
-            await _session.SaveChangesAsync();
+            };
+
+            await AppendEvent(id, taskAssignedEvent);
             return Ok();
         }
 
         [HttpGet("count-by-status")]
-        public async Task<IActionResult> CountTasksByStatus([FromQuery] string status)
+        public async Task<int> CountTasksByStatusFromEventsAsync(string status)
         {
-            var tasks = await _session.Query<TaskModel>().Where(t => t.Status == status).ToListAsync();
-            return Ok(new { Status = status, Count = tasks.Count });
+            var sql = @"
+                SELECT COUNT(*) 
+                FROM (
+                    SELECT DISTINCT ON (stream_id) stream_id, 
+                        COALESCE(data->>'NewStatus', data->>'Status') AS Status
+                    FROM mt_events 
+                    WHERE LOWER(type) IN ('task_created', 'task_status_updated')  -- Include both creation and status update events
+                      AND (data->>'NewStatus' IS NOT NULL OR data->>'Status' IS NOT NULL)  -- Ensure at least one status field is present
+                    ORDER BY stream_id, seq_id DESC  -- Get the latest event per stream
+                ) AS latest_status
+                WHERE Status = @status;
+            ";
+
+            using var connection = _session.Connection;
+            return await connection.ExecuteScalarAsync<int>(sql, new { status });
         }
 
         [HttpGet("average-completion-time")]
         public async Task<IActionResult> GetAverageCompletionTime()
         {
-            var completedTasks = await _session.Query<TaskModel>()
-                                               .Where(t => t.Status == "Completed")
-                                               .ToListAsync();
-            if (!completedTasks.Any()) return Ok(0);
-
-            var averageTime = completedTasks.Average(t => (t.DueDate - t.CreatedAt).TotalDays);
+            var averageTime = await _taskService.GetAverageCompletionTimeAsync();
             return Ok(new { AverageCompletionTime = averageTime });
         }
 
         [HttpGet("tasks-per-user")]
         public async Task<IActionResult> GetTasksPerUser()
         {
-            var sql = @"
-                SELECT data->>'AssignedUser' AS User, COUNT(*) AS TaskCount
-                FROM mt_events
-                WHERE data->>'AssignedUser' IS NOT NULL
-                GROUP BY data->>'AssignedUser'
-            ";
-
-            var tasksPerUser = await _session.Connection
-                .QueryAsync<UserTaskCount>(sql);
-
+            var tasksPerUser = await _taskService.GetTasksPerUserAsync();
             return Ok(tasksPerUser);
+        }
+
+        private async Task AppendEvent(Guid streamId, object @event)
+        {
+            _session.Events.Append(streamId, @event);
+            await _session.SaveChangesAsync();
         }
     }
 }

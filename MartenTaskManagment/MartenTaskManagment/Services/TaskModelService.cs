@@ -1,4 +1,6 @@
-﻿using Marten;
+﻿using Dapper;
+using Marten;
+using MartenTaskManagment.DTOs;
 using MartenTaskManagment.Events;
 using MartenTaskManagment.Interfaces;
 using MartenTaskManagment.Models;
@@ -59,6 +61,78 @@ namespace MartenTaskManagment.Services
             }
 
             return task;
+        }
+
+        public async Task<List<TaskModel>> GetAllTasksAsync()
+        {
+            var allTaskIds = await _session.Events
+                .QueryRawEventDataOnly<TaskCreated>()
+                .Select(e => e.TaskId)
+                .Distinct()
+                .ToListAsync();
+
+            var tasks = new List<TaskModel>();
+            foreach (var taskId in allTaskIds)
+            {
+                var task = await GetTaskModelById(taskId);
+                if (task != null)
+                {
+                    tasks.Add(task);
+                }
+            }
+
+            return tasks;
+        }
+
+
+        public IEnumerable<object> GetUpdateEvents(Guid taskId, TaskModel existingTask, TaskUpdateDTO updatedTask)
+        {
+            var events = new List<object>();
+
+            if (existingTask.Title != updatedTask.Title && !string.IsNullOrEmpty(updatedTask.Title))
+            {
+                events.Add(new TaskTitleUpdated { TaskId = taskId, NewTitle = updatedTask.Title, UpdatedAt = DateTime.UtcNow });
+            }
+
+            if (existingTask.Description != updatedTask.Description && !string.IsNullOrEmpty(updatedTask.Description))
+            {
+                events.Add(new TaskDescriptionUpdated { TaskId = taskId, NewDescription = updatedTask.Description, UpdatedAt = DateTime.UtcNow });
+            }
+
+            if (updatedTask.DueDate.HasValue && existingTask.DueDate != updatedTask.DueDate.Value)
+            {
+                events.Add(new TaskDueDateUpdated { TaskId = taskId, NewDueDate = updatedTask.DueDate.Value, UpdatedAt = DateTime.UtcNow });
+            }
+
+            if (!string.IsNullOrEmpty(updatedTask.Status) && existingTask.Status != updatedTask.Status)
+            {
+                events.Add(new TaskStatusUpdated { TaskId = taskId, NewStatus = updatedTask.Status, UpdatedAt = DateTime.UtcNow });
+            }
+
+            return events;
+        }
+
+        public async Task<int> CountTasksByStatusAsync(string status)
+        {
+            return await _session.Query<TaskModel>().CountAsync(t => t.Status == status);
+        }
+
+        public async Task<double> GetAverageCompletionTimeAsync()
+        {
+            var completedTasks = await _session.Query<TaskModel>().Where(t => t.Status == "Completed").ToListAsync();
+            return completedTasks.Any() ? completedTasks.Average(t => (t.DueDate - t.CreatedAt).TotalDays) : 0;
+        }
+
+        public async Task<IEnumerable<UserTaskCount>> GetTasksPerUserAsync()
+        {
+            var sql = @"
+            SELECT data->>'AssignedUser' AS User, COUNT(*) AS TaskCount
+            FROM mt_events
+            WHERE data->>'AssignedUser' IS NOT NULL
+            GROUP BY data->>'AssignedUser'
+        ";
+
+            return await _session.Connection.QueryAsync<UserTaskCount>(sql);
         }
     }
 }
